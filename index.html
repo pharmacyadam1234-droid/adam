@@ -1707,7 +1707,7 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
         <input id="stName" placeholder="اسم الموظف">
         <input id="stEmail" type="email" dir="ltr" placeholder="البريد الإلكتروني" style="margin-top:6px">
         <input id="stPass" type="text" dir="ltr" placeholder="الرقم السري (6 أحرف فأكثر)" style="margin-top:6px">
-        <select id="stRole" style="margin-top:6px"><option value="staff">موظف (يرى كل شيء)</option><option value="manager">مدير (يدير الموظفين)</option></select>
+        <select id="stRole" style="margin-top:6px"><option value="staff">موظف (صلاحيات محدودة)</option><option value="manager">مدير (يدير الموظفين)</option></select>
         <button class="btn" type="button" onclick="staffAdd()">➕ إضافة موظف</button>
         <div id="staffList" style="margin-top:8px"></div>
         <label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:13px"><input type="checkbox" id="authReqChk" onchange="authToggle(this.checked)" style="width:auto"> إلزام تسجيل الدخول لفتح التطبيق</label>
