@@ -1730,7 +1730,7 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
     </div>
 
     <div class="card mgr-only">
-      <b>✨ إعدادات الذكاء الاصطناعي (Gemini 3.8 Flash)</b>
+      <b>✨ إعدادات الذكاء الاصطناعي (Gemini — الأسرع أولاً + تحويل تلقائي)</b>
       <div id="geminiKeyStatusBox" class="hint" style="margin-top:8px;"></div>
       <p style="font-size:12px; color:var(--mut); margin-top:6px;">يمكنك إضافة أكثر من مفتاح. إذا انتهت حصة مفتاح أو تعذّر، ينتقل التطبيق تلقائياً للمفتاح التالي، والمفتاح المدمج يبقى احتياطاً أخيراً.</p>
       <div class="row" style="margin-top:6px;">
@@ -1947,7 +1947,7 @@ const FIRESTORE_QUOTA_BYTES = 1024 * 1024 * 1024; // 1 GB Spark tier
 const INITIAL_MONTHS_WINDOW = 12; // Initial load: last 12 months
 const ORDER_IMG_MAX_DIM = 2000;
 const ORDER_IMG_QUALITY = 0.85;
-const AI_IMG_MAX_DIM = 1400; // lighter copy sent to Gemini only (faster upload & analysis)
+const AI_IMG_MAX_DIM = 1100; // lighter copy sent to Gemini only (faster upload & analysis)
 const AI_IMG_QUALITY = 0.72;
 const LAST_BACKUP_KEY = "adam_last_backup_at";
 const SNOOZE_BACKUP_KEY = "adam_backup_snooze_until";
@@ -3534,8 +3534,19 @@ async function handleSelectedInvoiceFile(file) {
 $("#aiCamInput").onchange = e => { handleSelectedInvoiceFile(e.target.files[0]); e.target.value = ""; };
 $("#aiPickInput").onchange = e => { handleSelectedInvoiceFile(e.target.files[0]); e.target.value = ""; };
 
-const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3-flash-preview"]; // fastest/stable first; last-good model is cached automatically
-const geminiCool = new Map();
+// الأسرع أولاً (Flash-Lite) ثم Flash الأقوى ثم الأسماء المستعارة. النموذج الذي يفشل يُتخطّى تلقائياً لفترة.
+const GEMINI_MODELS = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "gemini-flash-lite-latest",
+  "gemini-3.8-flash",
+  "gemini-3.6-flash",
+  "gemini-flash-latest",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash"
+];
+const geminiCool = new Map();       // مفتاح -> وقت انتهاء الإيقاف المؤقت
+const geminiModelCool = new Map();  // "مفتاح|نموذج" -> وقت انتهاء الإيقاف المؤقت
 let geminiLastGood = { key: "", model: "" };
 const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
@@ -3543,43 +3554,51 @@ function getGeminiKeys() {
   return [...new Set([...getCustomGeminiKeys(), DEFAULT_GEMINI_KEY].filter(Boolean))];
 }
 
-async function geminiRequest(apiKey, modelName, parts, timeoutMs = 25000, fast = true) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const generationConfig = { temperature: 0.1 };
-    if (fast) {
-      generationConfig.responseMimeType = "application/json";
-      generationConfig.thinkingConfig = { thinkingBudget: 0 };
-    }
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig }),
-      signal: ctrl.signal
-    });
-    const json = await resp.json().catch(() => ({}));
-    const msg = json?.error?.message || `خطأ HTTP ${resp.status}`;
-    // some models reject thinkingConfig / JSON mode: retry once in plain mode
-    if (!resp.ok && fast && resp.status === 400 && /thinking|responseMimeType|mime|budget|generation_config|generationConfig/i.test(msg)) {
+// إعدادات التوليد من الأسرع إلى الأبسط: إذا رفضها النموذج (400) نعيد بإعداد أبسط بدل الفشل
+function geminiGenConfig(level) {
+  if (level === 0) return { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } };
+  if (level === 1) return { responseMimeType: "application/json" };
+  return {};
+}
+
+async function geminiRequest(apiKey, modelName, parts, timeoutMs = 25000) {
+  let last = null;
+  for (let level = 0; level <= 2; level++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const body = { contents: [{ role: "user", parts }] };
+      const cfg = geminiGenConfig(level);
+      if (Object.keys(cfg).length) body.generationConfig = cfg;
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify(body),
+        signal: ctrl.signal
+      });
+      const json = await resp.json().catch(() => ({}));
+      const msg = json?.error?.message || `خطأ HTTP ${resp.status}`;
+      last = { ok: resp.ok, status: resp.status, json, msg };
+      const keyErr = /api key|api_key|unauthenticated|permission|credential/i.test(msg);
+      // 400 بسبب إعداد غير مدعوم في هذا النموذج -> جرّب إعداداً أبسط لنفس النموذج
+      if (!resp.ok && resp.status === 400 && !keyErr && level < 2) continue;
+      return last;
+    } catch (e) {
+      return { ok: false, status: 0, json: null, net: true, msg: e?.name === "AbortError" ? "انتهت مهلة الاتصال" : "تعذر الاتصال بخادم Gemini" };
+    } finally {
       clearTimeout(timer);
-      return await geminiRequest(apiKey, modelName, parts, timeoutMs, false);
     }
-    return { ok: resp.ok, status: resp.status, json, msg };
-  } catch (e) {
-    return { ok: false, status: 0, json: null, net: true, msg: e?.name === "AbortError" ? "انتهت مهلة الاتصال" : "تعذر الاتصال بخادم Gemini" };
-  } finally {
-    clearTimeout(timer);
   }
+  return last;
 }
 
 function classifyGeminiErr(r) {
   const m = r.msg || "";
   if (r.net) return "net";
-  if (r.status === 404 || /no longer available|not found|not supported/i.test(m)) return "model";
+  if (r.status === 404 || /no longer available|not found|not supported|deprecated|shut ?down/i.test(m)) return "model";
   if (r.status === 429 || /quota|resource.?exhausted|rate limit/i.test(m)) return "quota";
   if ([500, 502, 503, 504].includes(r.status) || /high demand|overloaded|unavailable|try again later/i.test(m)) return "busy";
-  if ([401, 403].includes(r.status) || (r.status === 400 && /api key|unauthenticated|permission|access_token|credential/i.test(m))) return "key";
+  if ([401, 403].includes(r.status) || (r.status === 400 && /api key|api_key|unauthenticated|permission|access_token|credential/i.test(m))) return "key";
   return "fatal";
 }
 
@@ -3588,43 +3607,51 @@ async function callGeminiGenerateContent(parts) {
   if (!all.length) throw new Error("لا يوجد مفتاح Gemini. أضفه من الإعدادات ← مفاتيح Gemini.");
   let keys = all.filter(k => (geminiCool.get(k) || 0) <= Date.now());
   if (!keys.length) keys = all;
-  if (geminiLastGood.key && keys.includes(geminiLastGood.key)) {
-    keys = [geminiLastGood.key, ...keys.filter(k => k !== geminiLastGood.key)];
-  }
 
   let lastMsg = "";
-  let sawBusy = false, sawQuota = false, sawKey = false;
+  let timeouts = 0;
+  let sawBusy = false, sawQuota = false, sawKey = false, sawModel = false;
 
   for (let round = 0; round < 2; round++) {
     sawBusy = false;
     for (const apiKey of keys) {
-      let models = [...GEMINI_MODELS];
-      if (geminiLastGood.key === apiKey && models.includes(geminiLastGood.model)) {
-        models = [geminiLastGood.model, ...models.filter(m => m !== geminiLastGood.model)];
-      }
-      let quotaHits = 0;
+      // الترتيب ثابت: الأسرع أولاً. النماذج الفاشلة مؤخراً تُتخطّى.
+      let models = GEMINI_MODELS.filter(m => (geminiModelCool.get(apiKey + "|" + m) || 0) <= Date.now());
+      if (!models.length) models = [...GEMINI_MODELS];
       for (const modelName of models) {
+        const cool = (ms) => geminiModelCool.set(apiKey + "|" + modelName, Date.now() + ms);
         const r = await geminiRequest(apiKey, modelName, parts);
         if (r.ok) {
-          geminiLastGood = { key: apiKey, model: modelName };
-          return { data: r.json, modelName };
+          const hasText = r.json?.candidates?.[0]?.content?.parts?.some(p => p.text);
+          if (hasText) {
+            geminiLastGood = { key: apiKey, model: modelName };
+            return { data: r.json, modelName };
+          }
+          // رد فارغ/محجوب -> جرّب النموذج التالي
+          lastMsg = r.json?.promptFeedback?.blockReason || "رد فارغ من النموذج";
+          cool(2 * 60 * 1000);
+          continue;
         }
         lastMsg = r.msg;
         const kind = classifyGeminiErr(r);
         if (kind === "net") {
-          if (/مهلة/.test(r.msg)) { sawBusy = true; continue; } // timeout -> try next model quickly
+          if (/مهلة/.test(r.msg)) {
+            sawBusy = true; cool(45 * 1000);
+            if (++timeouts >= 3) throw new Error("الاتصال بالإنترنت بطيء أو ضعيف ولم يصل الطلب إلى Gemini. بدّل الشبكة (واي فاي/بيانات) وأعد المحاولة.");
+            continue; // انتهت المهلة -> النموذج التالي فوراً
+          }
           throw new Error(`${r.msg} — تأكد من الإنترنت.`);
         }
-        if (kind === "model") continue;
-        if (kind === "busy") { sawBusy = true; continue; }
-        if (kind === "quota") { sawQuota = true; quotaHits++; continue; }
+        if (kind === "model") { sawModel = true; cool(24 * 60 * 60 * 1000); continue; } // نموذج غير موجود/متوقف
+        if (kind === "busy") { sawBusy = true; cool(45 * 1000); continue; }
+        if (kind === "quota") { sawQuota = true; cool(90 * 1000); continue; }
         if (kind === "key") { sawKey = true; geminiCool.set(apiKey, Date.now() + 30 * 60 * 1000); break; }
-        throw new Error(r.msg);
+        // خطأ غير معروف (fatal): لا نتوقف، ننتقل للنموذج التالي
+        cool(10 * 60 * 1000);
       }
-      if (quotaHits >= 2) geminiCool.set(apiKey, Date.now() + 10 * 60 * 1000);
     }
     if (round === 0 && sawBusy && !sawQuota && !sawKey) {
-      await sleepMs(3000);
+      await sleepMs(2000);
       continue;
     }
     break;
@@ -3634,6 +3661,7 @@ async function callGeminiGenerateContent(parts) {
   if (sawBusy) friendly = "خوادم Gemini تحت ضغط عالٍ حالياً وجرّبنا كل النماذج. أعد المحاولة بعد دقيقة.";
   else if (sawQuota) friendly = "انتهت حصة المفاتيح الحالية. أضف مفتاحاً آخر من الإعدادات أو انتظر قليلاً.";
   else if (sawKey) friendly = "كل المفاتيح مرفوضة. تأكد من صحتها من الإعدادات.";
+  else if (sawModel) friendly = "كل النماذج المتاحة رفضت الطلب.";
   else friendly = "فشل الاتصال بـ Gemini.";
   throw new Error(`${friendly}\n(${lastMsg})`);
 }
@@ -3681,7 +3709,6 @@ $("#aiAnalyzeBtn").onclick = async () => {
   const anBtn = $("#aiAnalyzeBtn");
   anBtn.disabled = true;
   aiInline(true, "جارِ قراءة القائمة...");
-  if (aiDraft.fileDataUrl) prefetchUpload(aiDraft.fileDataUrl); // upload photo while AI analyzes
   try {
     const promptText = `استخرج بيانات فاتورة مذخر أدوية من الصورة/الملف. أعد JSON فقط بالشكل التالي (مفاتيح قصيرة، لا تضف "u" إلا إذا كنت غير متأكد من القراءة):
 {"orderNumber":"","date":"YYYY-MM-DD","total":0,"discount":0,"finalTotal":0,"items":[{"n":"اسم الدواء","c":"التركيز مثل 500mg","f":"Tab/Cap/Amp/Syr","q":1,"p":0,"t":0,"e":""}]}
@@ -3866,6 +3893,22 @@ function updateAiMathChecks() {
   box.innerHTML = html;
 }
 
+async function uploadPhotoAfterSave(docId, dataUrl, isEdit) {
+  try {
+    const up = await uploadToCloudinary(dataUrl);
+    if (!up?.url) return;
+    const patch = { img: up.url };
+    if (up.publicId) patch.imgPublicId = up.publicId;
+    if (up.deleteToken) patch.imgDeleteToken = up.deleteToken;
+    await updateDoc(doc(fsDb, "orders", String(docId)), patch);
+    if (isEdit) syncLocalOrderPatch(String(docId), patch);
+    showToast("📷 تم رفع صورة القائمة");
+  } catch (e) {
+    console.warn("photo upload after save failed", e);
+    showToast("⚠️ حُفظت الطلبية لكن تعذر رفع الصورة");
+  }
+}
+
 async function persistDraftOrder(withPhoto = true) {
   if (!fsDb) return await Dialog.alert("قاعدة البيانات غير متصلة حالياً.");
   const wId = aiDraft.header.warehouseId;
@@ -3908,12 +3951,14 @@ async function persistDraftOrder(withPhoto = true) {
   const finalAmt = rawFinal ?? rawTot ?? itemsSum;
   const totalAmt = rawTot ?? round2(finalAmt + rawDisc);
 
-  busy(true, withPhoto && aiDraft.fileDataUrl ? "جارِ رفع الصورة وحفظ الطلبية..." : "جارِ حفظ الطلبية سحابياً...");
+  busy(true, "جارِ حفظ الطلبية سحابياً...");
   try {
-    let uploaded = null;
+    let uploaded = null, bgPhoto = null;
     if (withPhoto && aiDraft.fileDataUrl) {
-      uploaded = await uploadCached(aiDraft.fileDataUrl);
+      if (/^https?:\/\//i.test(aiDraft.fileDataUrl)) uploaded = await uploadToCloudinary(aiDraft.fileDataUrl);
+      else bgPhoto = aiDraft.fileDataUrl; // uploaded in background AFTER the order is saved
     }
+    let savedId = null;
 
     const payload = {
       id: isNaN(Number(orderNo)) ? orderNo : Number(orderNo),
@@ -3937,11 +3982,14 @@ async function persistDraftOrder(withPhoto = true) {
     if (aiDraft.editDocId) {
       await updateDoc(doc(fsDb, "orders", String(aiDraft.editDocId)), payload);
       syncLocalOrderPatch(String(aiDraft.editDocId), payload);
+      savedId = String(aiDraft.editDocId);
     } else {
       payload.type = "ok";
       payload.createdAt = Date.now();
-      await addDoc(collection(fsDb, "orders"), payload);
+      const ref = await addDoc(collection(fsDb, "orders"), payload);
+      savedId = ref.id;
     }
+    if (bgPhoto && savedId) uploadPhotoAfterSave(savedId, bgPhoto, !!aiDraft.editDocId);
 
     busy(false);
     await Dialog.alert("✅ تم حفظ الطلبية بنجاح!");
