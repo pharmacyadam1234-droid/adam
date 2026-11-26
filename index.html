@@ -3709,9 +3709,35 @@ $("#aiAnalyzeBtn").onclick = async () => {
   anBtn.disabled = true;
   aiInline(true, "جارِ قراءة القائمة...");
   try {
-    const promptText = `استخرج بيانات فاتورة مذخر أدوية من الصورة/الملف. أعد JSON فقط بالشكل التالي (مفاتيح قصيرة، لا تضف "u" إلا إذا كنت غير متأكد من القراءة):
-{"orderNumber":"","date":"YYYY-MM-DD","total":0,"discount":0,"finalTotal":0,"items":[{"n":"اسم الدواء","c":"التركيز مثل 500mg","f":"Tab/Cap/Amp/Syr","q":1,"p":0,"t":0,"e":""}]}
-n=الاسم، c=التركيز، f=الشكل، q=الكمية، p=سعر الوحدة، t=مجموع السطر، e=تاريخ انتهاء الصلاحية بصيغة YYYY-MM إن كان مكتوباً في الفاتورة وإلا اتركه فارغاً. u:true فقط للسطر غير المؤكد.`;
+    const promptText = `استخرج بيانات فاتورة مذخر أدوية من الصورة/الملف. قد تكون الصورة مقلوبة أو مدارة 90° أو مائلة: أدرها ذهنياً واقرأها بالاتجاه الصحيح.
+قواعد صارمة:
+1) اقرأ جدول المواد سطراً سطراً من الأول إلى الأخير بدون تخطي أي سطر. كل رقم في عمود (ت أو #) = عنصر مستقل في items.
+2) إذا تشابه اسمان (أو تطابقا) وكانت الشركة مختلفة أو اللغة مختلفة (عربي/إنجليزي) أو السعر مختلفاً فهما عنصران منفصلان، لا تدمجهما أبداً. لا تدمج سطرين في عنصر واحد ولا تتجاهل سطراً لأن اسمه يشبه السطر الذي قبله أو لأنه بالإنجليزية والآخر بالعربية، ولا تأخذ اسم سطر وأرقام سطر آخر.
+3) اسم الدواء وكميته وسعره ومجموعه تُؤخذ من نفس السطر فقط.
+4) اكتب في الحقل rows عدد أسطر جدول المواد الذي رأيته فعلاً، ويجب أن يساوي عدد عناصر items.
+أعد JSON فقط بالشكل التالي (مفاتيح قصيرة، لا تضف "u" إلا إذا كنت غير متأكد من القراءة):
+{"rows":0,"orderNumber":"","date":"YYYY-MM-DD","total":0,"discount":0,"finalTotal":0,"items":[{"n":"اسم الدواء","c":"التركيز مثل 500mg","f":"Tab/Cap/Amp/Syr","q":1,"p":0,"t":0,"e":""}]}
+n=الاسم، c=التركيز، f=الشكل، q=الكمية، p=سعر الوحدة (قبل الخصم)، t=مجموع السطر، e=تاريخ انتهاء الصلاحية بصيغة YYYY-MM إن كان مكتوباً في الفاتورة وإلا اتركه فارغاً. u:true فقط للسطر غير المؤكد.`;
+
+    // مساعدات: قراءة الرد وقياس مطابقة المجموع
+    const parseAi = (raw) => {
+      const m = String(raw || "").match(/\{[\s\S]*\}/);
+      if (!m) return null;
+      try { return JSON.parse(m[0]); } catch { return null; }
+    };
+    const lineVal = (it) => num(it.t ?? it.lineTotal) ?? ((Number(it.q ?? it.quantity) || 1) * (num(it.p ?? it.unitPrice) || 0));
+    const sumItems = (arr) => round2((arr || []).reduce((t, it) => t + (lineVal(it) || 0), 0));
+    const gapOf = (p) => {
+      if (!p || !Array.isArray(p.items) || !p.items.length) return Infinity;
+      const sum = sumItems(p.items);
+      const tot = num(p.total), disc = num(p.discount) || 0, fin = num(p.finalTotal);
+      const c = [];
+      if (fin != null) { c.push(fin - sum, fin - (sum - disc)); }
+      if (tot != null) c.push(tot - sum);
+      if (!c.length) return 0;
+      return Math.min(...c.map(Math.abs));
+    };
+    const rowsMissing = (p) => p && Number(p.rows) > 0 && Array.isArray(p.items) && p.items.length < Number(p.rows);
 
     const { data } = await callGeminiGenerateContent([
       { text: promptText },
@@ -3719,10 +3745,26 @@ n=الاسم، c=التركيز، f=الشكل، q=الكمية، p=سعر ال�
     ]);
 
     const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("لم يتمكن الذكاء الاصطناعي من قراءة الجدول بوضوح.");
+    let parsed = parseAi(rawText);
+    if (!parsed) throw new Error("لم يتمكن الذكاء الاصطناعي من قراءة الجدول بوضوح.");
 
-    const parsed = JSON.parse(jsonMatch[0]);
+    // إذا لم يطابق مجموع الأصناف القائمة (غالباً سطر ناقص) نعيد القراءة مرة واحدة بتنبيه محدد
+    if (gapOf(parsed) > 1 || rowsMissing(parsed)) {
+      try {
+        aiInline(true, "المجموع لا يطابق القائمة، جارِ إعادة قراءة الأسطر...");
+        const sum1 = sumItems(parsed.items);
+        const target = num(parsed.finalTotal) ?? num(parsed.total) ?? 0;
+        const retryPrompt = promptText + `\n\nتنبيه مهم: في القراءة السابقة استخرجتَ ${(parsed.items || []).length} عنصراً فقط ومجموع أسطرها ${sum1} بينما المبلغ المكتوب في الفاتورة ${target}. غالباً هناك سطر أو أكثر ناقص أو مقروء بشكل خاطئ. هذه قراءتك السابقة للمراجعة:\n${JSON.stringify(parsed.items || [])}\nأعد قراءة جدول المواد كاملاً من الصفحة سطراً سطراً (لا تكتفِ بإضافة ما ينقص، أعد القائمة كاملة) وأرجع JSON كاملاً بنفس الشكل.`;
+        const r2 = await callGeminiGenerateContent([
+          { text: retryPrompt },
+          { inline_data: { mime_type: aiDraft.mimeType, data: aiDraft.fileBase64 } }
+        ]);
+        const p2 = parseAi(r2?.data?.candidates?.[0]?.content?.parts?.[0]?.text || "");
+        // نعتمد القراءة الثانية فقط إذا كانت أقرب لمطابقة المجموع
+        if (p2 && gapOf(p2) < gapOf(parsed)) parsed = p2;
+        else if (p2 && gapOf(p2) === gapOf(parsed) && (p2.items || []).length > (parsed.items || []).length) parsed = p2;
+      } catch (e) { console.warn("AI retry failed:", e); }
+    }
     if (!aiDraft.header.orderNumber && parsed.orderNumber) aiDraft.header.orderNumber = String(parsed.orderNumber).trim();
     if (!aiDraft.header.date && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date || "")) aiDraft.header.date = parsed.date;
 
