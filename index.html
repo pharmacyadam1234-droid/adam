@@ -4078,7 +4078,7 @@ function hideSearchSuggestions() {
   $("#rQSug")?.classList.add("hide");
 }
 
-function buildSearchSuggestions(ordersPool, qText) {
+function buildSearchSuggestions(ordersPool, qText, retMode = false) {
   const q = String(qText || "").trim().toLowerCase();
   if (!q) return [];
   const res = [];
@@ -4088,6 +4088,19 @@ function buildSearchSuggestions(ordersPool, qText) {
     const noStr = String(o.id || "");
     const sup = wName(o);
     const rb = getOrderReturnsBreakdown(o);
+    if (retMode) {
+      // صفحة المردود: اقتراح مواد المردود فقط، لكل دواء القائمة التي هو فيها
+      for (const rit of getOrderRetItems(o)) {
+        const rn = String(rit.name || "").trim();
+        const key = "R" + String(o.docId) + "|" + rn.toLowerCase();
+        if (rn && rn.toLowerCase().includes(q) && !seenMeds.has(key)) {
+          seenMeds.add(key);
+          res.push({ val: rn, docId: String(o.docId), title: rn, sub: `مردود من قائمة #${noStr} (${sup}) — ${o.date || ""}`, badge: "مردود", bCls: "ac-b-ret" });
+        }
+      }
+      if (res.length >= 12) break;
+      continue;
+    }
     if (noStr.toLowerCase().includes(q) || sup.toLowerCase().includes(q)) {
       res.push({
         val: noStr,
@@ -4099,8 +4112,8 @@ function buildSearchSuggestions(ordersPool, qText) {
     }
     for (const it of (o.items || [])) {
       const full = getOrderItemFullName(it);
-      if (full && full.toLowerCase().includes(q) && !seenMeds.has(full.toLowerCase())) {
-        seenMeds.add(full.toLowerCase());
+      if (full && full.toLowerCase().includes(q) && !seenMeds.has("M" + full.toLowerCase())) {
+        seenMeds.add("M" + full.toLowerCase());
         res.push({
           val: it.name || full,
           title: full,
@@ -4110,18 +4123,31 @@ function buildSearchSuggestions(ordersPool, qText) {
         });
       }
     }
+    for (const rit of getOrderRetItems(o)) {
+      const rn = String(rit.name || "").trim();
+      if (rn && rn.toLowerCase().includes(q) && !seenMeds.has("R" + rn.toLowerCase())) {
+        seenMeds.add("R" + rn.toLowerCase());
+        res.push({
+          val: rn,
+          title: rn,
+          sub: `مردود في قائمة #${noStr} (${sup})`,
+          badge: "مردود",
+          bCls: "ac-b-ret"
+        });
+      }
+    }
     if (res.length >= 12) break;
   }
   return res.slice(0, 10);
 }
 
-function bindAutocomplete(inputSel, listSel, poolGetter, onSelectFn) {
+function bindAutocomplete(inputSel, listSel, poolGetter, onSelectFn, retMode = false) {
   const inp = $(inputSel);
   const box = $(listSel);
   if (!inp || !box) return;
 
   const updateBox = () => {
-    const items = buildSearchSuggestions(poolGetter(), inp.value);
+    const items = buildSearchSuggestions(poolGetter(), inp.value, retMode);
     if (!items.length) {
       box.classList.add("hide");
       box.innerHTML = "";
@@ -4139,6 +4165,7 @@ function bindAutocomplete(inputSel, listSel, poolGetter, onSelectFn) {
         const picked = items[Number(btn.dataset.acIdx)];
         if (picked) {
           inp.value = picked.val;
+          if (picked.docId) inp.dataset.pickDoc = picked.docId; else delete inp.dataset.pickDoc;
           box.classList.add("hide");
           onSelectFn();
         }
@@ -4146,7 +4173,7 @@ function bindAutocomplete(inputSel, listSel, poolGetter, onSelectFn) {
     });
   };
 
-  inp.addEventListener("input", () => { updateBox(); onSelectFn(); });
+  inp.addEventListener("input", () => { delete inp.dataset.pickDoc; updateBox(); onSelectFn(); });
   inp.addEventListener("focus", updateBox);
 }
 
@@ -4173,7 +4200,10 @@ function getLogFilteredOrders() {
       const matchId = String(o.id || "").toLowerCase().includes(q);
       const matchW = wName(o).toLowerCase().includes(q);
       const matchMed = (o.items || []).some(it => getOrderItemFullName(it).toLowerCase().includes(q));
-      if (!matchId && !matchW && !matchMed) return false;
+      const retIts = getOrderRetItems(o);
+      const matchRetMed = retIts.some(it => String(it.name || "").toLowerCase().includes(q));
+      const matchRetList = retIts.some(it => String(it.retListNo || "").toLowerCase().includes(q));
+      if (!matchId && !matchW && !matchMed && !matchRetMed && !matchRetList) return false;
     }
     return true;
   });
@@ -4591,6 +4621,8 @@ function renderReturnsDetail() {
     if (fromD && String(o.date || "") < fromD) return false;
     if (toD && String(o.date || "") > toD) return false;
     if (q) {
+      const pickDoc = $("#rQ")?.dataset.pickDoc;
+      if (pickDoc && String(o.docId) !== pickDoc) return false;
       const mId = String(o.id || "").toLowerCase().includes(q);
       const mList = rb.items.some(it => String(it.retListNo || "").toLowerCase().includes(q));
       const mMed = rb.items.some(it => String(it.name || "").toLowerCase().includes(q));
@@ -4701,10 +4733,11 @@ function renderReturnsDetail() {
   }).join("");
 }
 
-bindAutocomplete("#rQ", "#rQSug", () => state.orders.filter(o => String(o.w) === String(curW) && getOrderReturnsBreakdown(o).hasReturn), () => renderReturnsDetail());
+bindAutocomplete("#rQ", "#rQSug", () => state.orders.filter(o => String(o.w) === String(curW) && getOrderReturnsBreakdown(o).hasReturn), () => renderReturnsDetail(), true);
 
 $("#rClr").onclick = () => {
   $("#rQ").value = "";
+  delete $("#rQ").dataset.pickDoc;
   $("#rMonth").value = "";
   $("#rFrom").value = "";
   $("#rTo").value = "";
