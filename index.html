@@ -662,6 +662,14 @@ th { background: var(--pr-soft); color: var(--pr); font-weight: 700; }
 .re-list-btn .rl-ic { font-size: 17px; line-height: 1; }
 .re-list-btn .rl-txt { font-size: 10.5px; font-weight: 700; white-space: nowrap; }
 
+.re-unified { margin-top: 12px; padding: 12px; border: 1.5px solid var(--pr); background: var(--pr-soft); border-radius: 14px; }
+.re-unified-title { font-size: 13px; font-weight: 800; color: var(--pr); margin-bottom: 8px; }
+.re-unified-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.re-unified-grid label { margin-top: 0; font-size: 12px; }
+.re-unified .btn:disabled { opacity: .5; cursor: not-allowed; }
+.re-more-btn { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 12px; border: 1px solid var(--ln); background: var(--bg); color: var(--tx); font-size: 22px; font-weight: 800; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.re-more-btn:active { transform: scale(0.93); }
+.rbadge-edit { background: #DBEAFE; color: #1E40AF; }
 .re-item-status {
   display: flex;
   flex-wrap: wrap;
@@ -1500,8 +1508,21 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
         <option value="أخرى">أخرى</option>
       </select>
 
-      <label style="margin-top:12px;">المواد المسترجعة (أدخل الكمية المسترجعة فقط، واضغط «قائمة مردود» لإدخال قائمة كل مادة)</label>
-      <div id="reMedsList" style="margin-top:8px;"></div>
+      <div class="re-unified">
+        <div class="re-unified-title">🧾 قائمة المردود (تُطبَّق على جميع المواد)</div>
+        <div class="re-unified-grid">
+          <div>
+            <label>رقم قائمة المردود</label>
+            <input id="reTopNo" type="number" inputmode="numeric" placeholder="رقم القائمة">
+          </div>
+          <div>
+            <label>تاريخ قائمة المردود</label>
+            <input id="reTopDate" type="date">
+          </div>
+        </div>
+        <button type="button" class="btn" id="reMatchBtn" style="margin-top:10px; width:100%;" disabled>✔ مطابق — الأسعار مطابقة لقائمة المردود</button>
+      </div>
+      <div id="reMedsList" style="margin-top:10px;"></div>
 
       <div class="row" style="margin-top:14px;">
         <button type="button" class="btn" id="reSaveBtn">💾 حفظ المردود</button>
@@ -1529,17 +1550,16 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
     </div>
 
     <div class="card">
-      <h3 style="margin:0 0 10px; font-size:15px;">🧾 معلومات قائمة المردود لهذه المادة</h3>
+      <h3 style="margin:0 0 10px; font-size:15px;">⋮ تعديل قائمة المردود لهذه المادة فقط</h3>
 
       <label>رقم قائمة المردود</label>
-      <input id="rilListNo" type="number" inputmode="numeric" placeholder="أدخل رقم قائمة المردود عند استلامها">
+      <input id="rilListNo" type="number" inputmode="numeric" placeholder="رقم قائمة المردود">
 
-      <label>تاريخ قائمة المردود</label>
+      <label>السعر (المبلغ الفعلي لهذه المادة)</label>
+      <input id="rilListAmt" type="number" step="any" inputmode="decimal" placeholder="السعر الفعلي في قائمة المردود">
+
+      <label>التاريخ</label>
       <input id="rilListDate" type="date">
-
-      <label>المبلغ الفعلي المخصوم (من قائمة المردود الورقية)</label>
-      <input id="rilListAmt" type="number" step="any" inputmode="decimal" placeholder="أدخل المبلغ الفعلي المذكور في قائمة المردود الورقية">
-      <div style="font-size:11.5px; color:var(--mut); margin-top:5px;">💡 أدخل السعر الفعلي دائماً من قائمة المردود الورقية لإظهار الفروقات الحقيقية (الزيادة أو النقصان) مع المذخر.</div>
 
       <div id="rilApplyAllWrap" class="hide" style="margin-top:14px;">
         <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; background:var(--pr-soft); border:1px solid var(--pr); border-radius:12px; padding:11px 12px; font-size:13px; font-weight:700; margin:0;">
@@ -2238,6 +2258,8 @@ function normalizeReturnItem(raw, o) {
   const rawListAmt = raw.retListAmt ?? raw.listAmt ?? raw.returnListAmt;
   const retListAmt = rawListAmt != null && rawListAmt !== "" ? Number(rawListAmt) : null;
 
+  const retEdited = Boolean(raw.retEdited) && Boolean(retListNo);
+
   return {
     name,
     origQty,
@@ -2246,7 +2268,8 @@ function normalizeReturnItem(raw, o) {
     expectedAmt,
     retListNo,
     retListDate,
-    retListAmt
+    retListAmt,
+    retEdited
   };
 }
 
@@ -4863,6 +4886,10 @@ function openReturnFor(docId, origin = "returns", preselectedItems = null) {
   }
 
   $("#reReason").value = o.retReason || "";
+  const firstDone = retDraft.find(it => !it.retEdited && String(it.retListNo || "").trim()) || retDraft.find(it => String(it.retListNo || "").trim());
+  $("#reTopNo").value = firstDone ? firstDone.retListNo : "";
+  $("#reTopDate").value = firstDone && firstDone.retListDate ? firstDone.retListDate : today();
+  syncTopMatchBtn();
   $("#reInlinePicker").classList.add("hide");
   show("returnEdit");
   renderReturnEdit();
@@ -4941,15 +4968,15 @@ function renderReturnEdit() {
               <span>سعر الوحدة: <b>${fmt(it.unitPrice)}</b></span>
             </div>
           </div>
-          <button type="button" class="re-list-btn ${hasL ? "done" : ""}" onclick="openReturnItemList(${idx})">
-            <span class="rl-ic">${hasL ? "✅" : "🧾"}</span>
-            <span class="rl-txt">${hasL ? `#${esc(it.retListNo)}` : "قائمة مردود"}</span>
-          </button>
+          <button type="button" class="re-more-btn" aria-label="تعديل قائمة المردود لهذه المادة" onclick="openReturnItemList(${idx})">⋮</button>
         </div>
 
         <div class="re-item-status">
-          <span class="rbadge ${hasL ? "rbadge-done" : "rbadge-wait"}">
-            ${hasL ? `تم الخصم (قائمة #${esc(it.retListNo)} — فعلي: ${fmt(act)})` : "بانتظار إدخال قائمة المردود"}
+          <span class="rbadge ${!hasL ? "rbadge-wait" : (it.retEdited ? "rbadge-edit" : "rbadge-done")}">
+            ${!hasL ? "بانتظار إدخال قائمة المردود"
+              : (it.retEdited
+                  ? `معدّل (قائمة #${esc(it.retListNo)} — ${esc(it.retListDate || "")} — فعلي: ${fmt(act)})`
+                  : `✔ مطابق (قائمة #${esc(it.retListNo)} — ${esc(it.retListDate || "")})`)}
           </span>
           <button type="button" class="btn del btn-s" style="padding:4px 9px; font-size:11px;" onclick="removeRetDraftItem(${idx})">حذف</button>
         </div>
@@ -4966,6 +4993,43 @@ function renderReturnEdit() {
       </div>`;
   }).join("");
 }
+
+function syncTopMatchBtn() {
+  const btn = $("#reMatchBtn");
+  if (btn) btn.disabled = !($("#reTopNo").value.trim() && $("#reTopDate").value);
+}
+
+// Apply top number/date automatically to items already matched (not individually edited)
+function applyTopToMatched() {
+  const no = $("#reTopNo").value.trim();
+  const dt = $("#reTopDate").value;
+  if (no && dt) {
+    retDraft.forEach(it => {
+      if (!it.retEdited && String(it.retListNo || "").trim()) {
+        it.retListNo = no;
+        it.retListDate = dt;
+      }
+    });
+    renderReturnEdit();
+  }
+}
+
+$("#reTopNo").oninput = () => { syncTopMatchBtn(); applyTopToMatched(); };
+$("#reTopDate").oninput = () => { syncTopMatchBtn(); applyTopToMatched(); };
+
+$("#reMatchBtn").onclick = async () => {
+  const no = $("#reTopNo").value.trim();
+  const dt = $("#reTopDate").value;
+  if (!no || !dt) return await Dialog.alert("أدخل رقم قائمة المردود وتاريخها أولاً.");
+  if (!retDraft.length) return await Dialog.alert("لا توجد مواد لتطبيق المطابقة عليها.");
+  retDraft.forEach(it => {
+    if (it.retEdited) return; // المواد المعدّلة من ⋮ تحتفظ بقيمها الخاصة
+    it.retListNo = no;
+    it.retListDate = dt;
+    it.retListAmt = null; // اعتماد السعر المحسوب تلقائياً
+  });
+  renderReturnEdit();
+};
 
 function stepRetDraftQty(idx, delta) {
   const it = retDraft[idx];
@@ -5023,7 +5087,7 @@ function openReturnItemList(idx) {
 
   $("#rilListNo").value = it.retListNo || "";
   $("#rilListDate").value = it.retListDate || today();
-  $("#rilListAmt").value = it.retListAmt != null && it.retListAmt !== "" ? it.retListAmt : "";
+  $("#rilListAmt").value = it.retListAmt != null && it.retListAmt !== "" ? it.retListAmt : exp;
 
   const updateRilPreview = () => {
     const actVal = num($("#rilListAmt").value);
@@ -5033,7 +5097,7 @@ function openReturnItemList(idx) {
     const pill = $("#rilStatusPill");
     if (pill) {
       pill.className = `pill ${hasNo ? "ok" : "wt"}`;
-      pill.textContent = hasNo ? "تم الخصم" : "بانتظار القائمة";
+      pill.textContent = hasNo ? "معدّل" : "بانتظار القائمة";
     }
     const diff = round2(displayAct - exp);
     const dh = $("#rilDiffHint");
@@ -5051,13 +5115,6 @@ function openReturnItemList(idx) {
   $("#rilListAmt").oninput = updateRilPreview;
   updateRilPreview();
 
-  const otherPending = retDraft.filter((x, i) => i !== idx && !String(x.retListNo || "").trim()).length;
-  const wrapAll = $("#rilApplyAllWrap");
-  if (wrapAll) {
-    wrapAll.classList.toggle("hide", otherPending === 0);
-    if ($("#rilApplyCount")) $("#rilApplyCount").textContent = `(${otherPending} مادة)`;
-  }
-
   show("returnItemList");
 }
 
@@ -5071,15 +5128,7 @@ $("#rilSaveBtn").onclick = () => {
   it.retListNo = listNo;
   it.retListDate = listNo ? listDate : "";
   it.retListAmt = listNo && listAmtRaw !== "" ? Number(listAmtRaw) : null;
-
-  if (listNo && $("#rilApplyAll")?.checked && !$("#rilApplyAllWrap")?.classList.contains("hide")) {
-    retDraft.forEach((other, i) => {
-      if (i !== activeReturnItemIdx && !String(other.retListNo || "").trim()) {
-        other.retListNo = listNo;
-        other.retListDate = listDate;
-      }
-    });
-  }
+  it.retEdited = Boolean(listNo);
 
   show("returnEdit");
   renderReturnEdit();
@@ -5103,7 +5152,8 @@ $("#reSaveBtn").onclick = async () => {
     expectedAmt: round2((Number(it.retQty) || 1) * (Number(it.unitPrice) || 0)),
     retListNo: String(it.retListNo || "").trim(),
     retListDate: String(it.retListDate || "").trim(),
-    retListAmt: it.retListAmt != null && it.retListAmt !== "" ? Number(it.retListAmt) : null
+    retListAmt: it.retListAmt != null && it.retListAmt !== "" ? Number(it.retListAmt) : null,
+    retEdited: Boolean(it.retEdited) && Boolean(String(it.retListNo || "").trim())
   }));
 
   const hasRet = cleanRet.length > 0;
